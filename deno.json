@@ -1,3 +1,6 @@
 {
-  "nodeModulesDir": true
+  "nodeModulesDir": true,
+  "install": {
+    "command": "deno install --allow-all"
+  }
 }
