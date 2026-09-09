@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.200.0/http/server.ts";
-import { MongoClient, ObjectId } from "npm:mongodb@6.3.0";
+import { MongoClient, ObjectId } from "https://deno.land/x/mongo@v0.32.0/mod.ts";
 
 const MONGODB_URI = "mongodb+srv://byprosprt2007_db_user:XkdKib4f18KnnSEQ@ac-0vbwrzk-shard.d8rcisl.mongodb.net/DashboardDB?retryWrites=true&w=majority";
 const DB_NAME = "bypro_orders";
