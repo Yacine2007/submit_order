@@ -154,7 +154,6 @@ async function handleRequest(req: Request): Promise<Response> {
     });
   }
 
-  // الصفحات
   if (method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
     try {
       const html = await Deno.readTextFile("./index.html");
@@ -163,6 +162,7 @@ async function handleRequest(req: Request): Promise<Response> {
       return new Response("index.html not found", { status: 404 });
     }
   }
+
   if (method === "GET" && url.pathname === "/dashboard") {
     try {
       const html = await Deno.readTextFile("./brmjli.html");
@@ -172,7 +172,6 @@ async function handleRequest(req: Request): Promise<Response> {
     }
   }
 
-  // API
   if (method === "POST" && url.pathname === "/submit_order") {
     try {
       const order = await req.json();
