@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json());
 app.use(express.static(__dirname));
 
-const MONGODB_URI = 'mongodb+srv://byprosprt2007_db_user:XkdKib4f18KnnSEQ@ac-0vbwrzk-shard.d8rcisl.mongodb.net/DashboardDB?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = 'bypro_orders';
 const COLLECTION = 'orders';
 
