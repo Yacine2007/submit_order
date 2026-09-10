@@ -239,4 +239,4 @@ async function handleRequest(req: Request): Promise<Response> {
   return new Response("Not Found", { status: 404 });
 }
 
-Deno.serve(handleRequest);
+export default { fetch: handleRequest };
