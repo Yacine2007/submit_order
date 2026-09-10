@@ -1,10 +1,18 @@
 import { MongoClient, ObjectId } from "npm:mongodb@6.3.0";
 
-const MONGODB_URI = "mongodb+srv://byprosprt2007_db_user:XkdKib4f18KnnSEQ@ac-0vbwrzk-shard.d8rcisl.mongodb.net/DashboardDB?retryWrites=true&w=majority";
-const DB_NAME = "bypro_orders";
+// ===== قراءة المفاتيح من متغيرات البيئة =====
+const MONGODB_URI = Deno.env.get("MONGODB_URI") || "";
+const IMGBB_API_KEY = Deno.env.get("IMGBB_API_KEY") || "";
+const DB_NAME = Deno.env.get("DB_NAME") || "bypro_orders";
 const ORDERS_COLLECTION = "orders";
 const SETTINGS_COLLECTION = "service_settings";
-const IMGBB_API_KEY = "fc9991d005e5853e23363a3b4077b390";
+
+if (!MONGODB_URI) {
+  console.error("❌ MONGODB_URI غير موجود في متغيرات البيئة");
+}
+if (!IMGBB_API_KEY) {
+  console.error("❌ IMGBB_API_KEY غير موجود في متغيرات البيئة");
+}
 
 const DEFAULT_SETTINGS = {
   _id: "service_settings",
@@ -93,7 +101,6 @@ const DEFAULT_SETTINGS = {
   ]
 };
 
-// ===== الاتصال الكسول بقاعدة البيانات =====
 let cachedClient: MongoClient | null = null;
 let cachedDb: any = null;
 
@@ -134,7 +141,6 @@ async function handleRequest(req: Request): Promise<Response> {
     });
   }
 
-  // ===== صفحات =====
   if (method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
     try {
       const html = await Deno.readTextFile("./index.html");
@@ -153,7 +159,6 @@ async function handleRequest(req: Request): Promise<Response> {
     }
   }
 
-  // ===== API =====
   try {
     const db = await getDb();
     const orders = db.collection(ORDERS_COLLECTION);
