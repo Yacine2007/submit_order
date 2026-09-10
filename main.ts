@@ -1,4 +1,4 @@
-import { serve } from "https://deno.land/std@0.200.0/http/server.ts";
+import { MongoClient, ObjectId } from "npm:mongodb@6.3.0";
 import { MongoClient, ObjectId } from "https://esm.sh/mongodb@6.3.0";
 
 const MONGODB_URI = "mongodb+srv://byprosprt2007_db_user:XkdKib4f18KnnSEQ@ac-0vbwrzk-shard.d8rcisl.mongodb.net/DashboardDB?retryWrites=true&w=majority";
