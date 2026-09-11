@@ -1,21 +1,27 @@
 import { MongoClient, ObjectId } from "npm:mongodb@6.3.0";
 
-// ===== قراءة المفاتيح من متغيرات البيئة =====
+// ============================================================
+// Environment
+// ============================================================
 const MONGODB_URI = Deno.env.get("MONGODB_URI") || "";
 const IMGBB_API_KEY = Deno.env.get("IMGBB_API_KEY") || "";
-const DB_NAME = Deno.env.get("DB_NAME") || "bypro_orders";
+const ORDERS_DB_NAME = Deno.env.get("ORDERS_DB_NAME") || "bypro_orders";
+const SETTINGS_DB_NAME = Deno.env.get("SETTINGS_DB_NAME") || "DashboardDB";
 const ORDERS_COLLECTION = "orders";
-const SETTINGS_COLLECTION = "service_settings";
+const SETTINGS_COLLECTION = "settings";
+const SETTINGS_KEY = "service_settings";
 
 if (!MONGODB_URI) {
-  console.error("❌ MONGODB_URI غير موجود في متغيرات البيئة");
+  console.error("MONGODB_URI is missing from environment variables");
 }
 if (!IMGBB_API_KEY) {
-  console.error("❌ IMGBB_API_KEY غير موجود في متغيرات البيئة");
+  console.error("IMGBB_API_KEY is missing from environment variables");
 }
 
+// ============================================================
+// Default settings (used only when DB has no document yet)
+// ============================================================
 const DEFAULT_SETTINGS = {
-  _id: "service_settings",
   categories: [
     { id: "design", enabled: true, services: [
       { id: "logos", enabled: true, label_ar: "شعارات", label_en: "Logos" },
@@ -101,24 +107,47 @@ const DEFAULT_SETTINGS = {
   ]
 };
 
+// ============================================================
+// MongoDB connection (single client, two databases)
+// ============================================================
 let cachedClient: MongoClient | null = null;
-let cachedDb: any = null;
+let cachedOrdersDb: any = null;
+let cachedSettingsDb: any = null;
 
-async function getDb() {
-  if (cachedDb) return cachedDb;
-  if (!cachedClient) {
-    cachedClient = new MongoClient(MONGODB_URI);
-    await cachedClient.connect();
-  }
-  cachedDb = cachedClient.db(DB_NAME);
-  return cachedDb;
+async function getClient(): Promise<MongoClient> {
+  if (cachedClient) return cachedClient;
+  if (!MONGODB_URI) throw new Error("MONGODB_URI is not configured");
+  const client = new MongoClient(MONGODB_URI, {
+    serverSelectionTimeoutMS: 10000,
+    connectTimeoutMS: 10000,
+  });
+  await client.connect();
+  cachedClient = client;
+  return client;
 }
 
+async function getOrdersDb() {
+  if (cachedOrdersDb) return cachedOrdersDb;
+  const client = await getClient();
+  cachedOrdersDb = client.db(ORDERS_DB_NAME);
+  return cachedOrdersDb;
+}
+
+async function getSettingsDb() {
+  if (cachedSettingsDb) return cachedSettingsDb;
+  const client = await getClient();
+  cachedSettingsDb = client.db(SETTINGS_DB_NAME);
+  return cachedSettingsDb;
+}
+
+// ============================================================
+// Helpers
+// ============================================================
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
-      "Content-Type": "application/json",
+      "Content-Type": "application/json; charset=utf-8",
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
@@ -126,13 +155,28 @@ function jsonResponse(data: unknown, status = 200) {
   });
 }
 
+function htmlResponse(html: string, status = 200) {
+  return new Response(html, {
+    status,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+  });
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+// ============================================================
+// Router
+// ============================================================
 async function handleRequest(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const method = req.method;
 
+  // ---- CORS preflight ----
   if (method === "OPTIONS") {
     return new Response(null, {
-      status: 200,
+      status: 204,
       headers: {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -141,10 +185,11 @@ async function handleRequest(req: Request): Promise<Response> {
     });
   }
 
+  // ---- Static HTML pages ----
   if (method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
     try {
       const html = await Deno.readTextFile("./index.html");
-      return new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+      return htmlResponse(html);
     } catch {
       return new Response("index.html not found", { status: 404 });
     }
@@ -153,90 +198,154 @@ async function handleRequest(req: Request): Promise<Response> {
   if (method === "GET" && url.pathname === "/dashboard") {
     try {
       const html = await Deno.readTextFile("./brmjli.html");
-      return new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+      return htmlResponse(html);
     } catch {
       return new Response("brmjli.html not found", { status: 404 });
     }
   }
 
+  // ---- API ----
   try {
-    const db = await getDb();
-    const orders = db.collection(ORDERS_COLLECTION);
-    const settingsCol = db.collection(SETTINGS_COLLECTION);
+    // ============================================================
+    // SERVICE SETTINGS  (shared with Flask: DashboardDB.settings)
+    // document shape: { key: "service_settings", value: { categories: [...] } }
+    // ============================================================
+    if (method === "GET" && url.pathname === "/get_service_settings") {
+      try {
+        const sdb = await getSettingsDb();
+        const doc = await sdb.collection(SETTINGS_COLLECTION).findOne({ key: SETTINGS_KEY });
+        if (doc && doc.value && Array.isArray(doc.value.categories)) {
+          return jsonResponse({ status: "success", settings: doc.value });
+        }
+        // No doc in DB → return defaults (without writing, to keep DB authoritative)
+        return jsonResponse({ status: "success", settings: DEFAULT_SETTINGS });
+      } catch (e) {
+        console.error("get_service_settings error:", errorMessage(e));
+        // On failure, still return defaults so the form works
+        return jsonResponse({ status: "success", settings: DEFAULT_SETTINGS });
+      }
+    }
 
+    if (method === "POST" && url.pathname === "/update_service_settings") {
+      const data = await req.json();
+      const settings = data.settings || data;
+      const sdb = await getSettingsDb();
+      await sdb.collection(SETTINGS_COLLECTION).updateOne(
+        { key: SETTINGS_KEY },
+        { $set: { value: settings, updated_at: new Date().toISOString() } },
+        { upsert: true }
+      );
+      return jsonResponse({ status: "success" });
+    }
+
+    // ============================================================
+    // ORDERS  (bypro_orders.orders)
+    // ============================================================
     if (method === "POST" && url.pathname === "/submit_order") {
+      const odb = await getOrdersDb();
       const order = await req.json();
       order.createdAt = new Date().toISOString();
       order.status = "pending";
       order.isNew = true;
-      await orders.insertOne(order);
+      const result = await odb.collection(ORDERS_COLLECTION).insertOne(order);
+      return jsonResponse({ status: "success", id: String(result.insertedId) });
+    }
+
+    if (method === "GET" && url.pathname === "/get_orders") {
+      const odb = await getOrdersDb();
+      const allOrders = await odb.collection(ORDERS_COLLECTION)
+        .find()
+        .sort({ createdAt: -1 })
+        .toArray();
+      return jsonResponse({ status: "success", orders: allOrders });
+    }
+
+    if (method === "POST" && url.pathname === "/update_order_status") {
+      const odb = await getOrdersDb();
+      const { id, status } = await req.json();
+      if (!id || !status) return jsonResponse({ status: "error", error: "id and status are required" }, 400);
+      let oid: ObjectId;
+      try {
+        oid = new ObjectId(id);
+      } catch {
+        return jsonResponse({ status: "error", error: "invalid order id" }, 400);
+      }
+      await odb.collection(ORDERS_COLLECTION).updateOne({ _id: oid }, { $set: { status } });
       return jsonResponse({ status: "success" });
     }
 
+    if (method === "POST" && url.pathname === "/delete_order") {
+      const odb = await getOrdersDb();
+      const { id } = await req.json();
+      if (!id) return jsonResponse({ status: "error", error: "id is required" }, 400);
+      let oid: ObjectId;
+      try {
+        oid = new ObjectId(id);
+      } catch {
+        return jsonResponse({ status: "error", error: "invalid order id" }, 400);
+      }
+      await odb.collection(ORDERS_COLLECTION).deleteOne({ _id: oid });
+      return jsonResponse({ status: "success" });
+    }
+
+    if (method === "POST" && url.pathname === "/mark_order_read") {
+      const odb = await getOrdersDb();
+      const { id } = await req.json();
+      if (!id) return jsonResponse({ status: "error", error: "id is required" }, 400);
+      let oid: ObjectId;
+      try {
+        oid = new ObjectId(id);
+      } catch {
+        return jsonResponse({ status: "error", error: "invalid order id" }, 400);
+      }
+      await odb.collection(ORDERS_COLLECTION).updateOne({ _id: oid }, { $set: { isNew: false } });
+      return jsonResponse({ status: "success" });
+    }
+
+    if (method === "POST" && url.pathname === "/mark_all_read") {
+      const odb = await getOrdersDb();
+      await odb.collection(ORDERS_COLLECTION).updateMany({ isNew: true }, { $set: { isNew: false } });
+      return jsonResponse({ status: "success" });
+    }
+
+    // ============================================================
+    // IMAGE UPLOAD (ImgBB)
+    // ============================================================
     if (method === "POST" && url.pathname === "/upload_images") {
+      if (!IMGBB_API_KEY) {
+        return jsonResponse({ status: "success", urls: [], warning: "IMGBB_API_KEY not configured" });
+      }
       const formData = await req.formData();
       const files = formData.getAll("images");
       const urls: string[] = [];
       for (const file of files) {
         if (file instanceof File) {
-          const arrayBuffer = await file.arrayBuffer();
-          const bytes = new Uint8Array(arrayBuffer);
-          let binary = "";
-          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-          const base64 = btoa(binary);
-          const imgbbRes = await fetch("https://api.imgbb.com/1/upload", {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({ key: IMGBB_API_KEY, image: base64 }).toString(),
-          });
-          const result = await imgbbRes.json();
-          if (result.success) urls.push(result.data.url);
+          try {
+            const arrayBuffer = await file.arrayBuffer();
+            const bytes = new Uint8Array(arrayBuffer);
+            let binary = "";
+            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+            const base64 = btoa(binary);
+            const imgbbRes = await fetch("https://api.imgbb.com/1/upload", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({ key: IMGBB_API_KEY, image: base64 }).toString(),
+            });
+            const result = await imgbbRes.json();
+            if (result.success && result.data && result.data.url) {
+              urls.push(result.data.url);
+            } else {
+              console.warn("ImgBB upload failed:", result);
+            }
+          } catch (e) {
+            console.warn("Image upload error:", errorMessage(e));
+          }
         }
       }
       return jsonResponse({ status: "success", urls });
     }
-
-    if (method === "GET" && url.pathname === "/get_service_settings") {
-      const settings = await settingsCol.findOne({ _id: "service_settings" });
-      return jsonResponse({ status: "success", settings: settings || DEFAULT_SETTINGS });
-    }
-
-    if (method === "POST" && url.pathname === "/update_service_settings") {
-      const data = await req.json();
-      data._id = "service_settings";
-      await settingsCol.replaceOne({ _id: "service_settings" }, data, { upsert: true });
-      return jsonResponse({ status: "success" });
-    }
-
-    if (method === "GET" && url.pathname === "/get_orders") {
-      const allOrders = await orders.find().sort({ createdAt: -1 }).toArray();
-      return jsonResponse({ status: "success", orders: allOrders });
-    }
-
-    if (method === "POST" && url.pathname === "/update_order_status") {
-      const { id, status } = await req.json();
-      await orders.updateOne({ _id: new ObjectId(id) }, { $set: { status } });
-      return jsonResponse({ status: "success" });
-    }
-
-    if (method === "POST" && url.pathname === "/delete_order") {
-      const { id } = await req.json();
-      await orders.deleteOne({ _id: new ObjectId(id) });
-      return jsonResponse({ status: "success" });
-    }
-
-    if (method === "POST" && url.pathname === "/mark_order_read") {
-      const { id } = await req.json();
-      await orders.updateOne({ _id: new ObjectId(id) }, { $set: { isNew: false } });
-      return jsonResponse({ status: "success" });
-    }
-
-    if (method === "POST" && url.pathname === "/mark_all_read") {
-      await orders.updateMany({ isNew: true }, { $set: { isNew: false } });
-      return jsonResponse({ status: "success" });
-    }
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
+  } catch (e) {
+    const msg = errorMessage(e);
     console.error("Handler error:", msg);
     return jsonResponse({ status: "error", error: msg }, 500);
   }
