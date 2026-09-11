@@ -11,16 +11,13 @@ const ORDERS_COLLECTION = "orders";
 const SETTINGS_COLLECTION = "settings";
 const SETTINGS_KEY = "service_settings";
 
-if (!MONGODB_URI) {
-  console.error("MONGODB_URI is missing from environment variables");
-}
-if (!IMGBB_API_KEY) {
-  console.error("IMGBB_API_KEY is missing from environment variables");
-}
+// ===== DIAGNOSTIC: print on startup =====
+console.log("=== submit-order service starting ===");
+console.log("MONGODB_URI:", MONGODB_URI ? "✓ set (" + MONGODB_URI.slice(0, 30) + "...)" : "✗ MISSING");
+console.log("IMGBB_API_KEY:", IMGBB_API_KEY ? "✓ set" : "✗ missing");
+console.log("ORDERS_DB_NAME:", ORDERS_DB_NAME);
+console.log("SETTINGS_DB_NAME:", SETTINGS_DB_NAME);
 
-// ============================================================
-// Default settings (used only when DB has no document yet)
-// ============================================================
 const DEFAULT_SETTINGS = {
   categories: [
     { id: "design", enabled: true, services: [
@@ -108,7 +105,7 @@ const DEFAULT_SETTINGS = {
 };
 
 // ============================================================
-// MongoDB connection (single client, two databases)
+// MongoDB connection with detailed error reporting
 // ============================================================
 let cachedClient: MongoClient | null = null;
 let cachedOrdersDb: any = null;
@@ -116,14 +113,42 @@ let cachedSettingsDb: any = null;
 
 async function getClient(): Promise<MongoClient> {
   if (cachedClient) return cachedClient;
-  if (!MONGODB_URI) throw new Error("MONGODB_URI is not configured");
+
+  if (!MONGODB_URI) {
+    throw new Error("MONGODB_URI غير مضبوط في متغيرات Deno Deploy. أضفه من Settings → Environment Variables.");
+  }
+
   const client = new MongoClient(MONGODB_URI, {
-    serverSelectionTimeoutMS: 10000,
-    connectTimeoutMS: 10000,
+    serverSelectionTimeoutMS: 15000,
+    connectTimeoutMS: 15000,
+    socketTimeoutMS: 20000,
+    // Allow TLS flexibility for Atlas
+    tls: true,
+    tlsAllowInvalidCertificates: true,
   });
-  await client.connect();
-  cachedClient = client;
-  return client;
+
+  try {
+    await client.connect();
+    // Verify the connection actually works
+    await client.db("admin").command({ ping: 1 });
+    cachedClient = client;
+    console.log("✓ MongoDB connected successfully");
+    return client;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("✗ MongoDB connection failed:", msg);
+    // Common hints
+    if (msg.includes("IP") || msg.includes("whitelist") || msg.includes("not allowed")) {
+      throw new Error("MongoDB Atlas يرفض الاتصال من Deno Deploy. افتح Atlas → Network Access → أضف 0.0.0.0/0");
+    }
+    if (msg.includes("authentication") || msg.includes("bad auth")) {
+      throw new Error("بيانات اعتماد MongoDB غير صحيحة. تحقق من اسم المستخدم وكلمة المرور في MONGODB_URI");
+    }
+    if (msg.includes("ENOTFOUND") || msg.includes("getaddrinfo")) {
+      throw new Error("عنوان MongoDB غير موجود. تحقق من صيغة MONGODB_URI");
+    }
+    throw e;
+  }
 }
 
 async function getOrdersDb() {
@@ -173,7 +198,6 @@ async function handleRequest(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const method = req.method;
 
-  // ---- CORS preflight ----
   if (method === "OPTIONS") {
     return new Response(null, {
       status: 204,
@@ -185,7 +209,27 @@ async function handleRequest(req: Request): Promise<Response> {
     });
   }
 
-  // ---- Static HTML pages ----
+  // ===== Health check =====
+  if (method === "GET" && url.pathname === "/health") {
+    const health: any = {
+      status: "ok",
+      timestamp: new Date().toISOString(),
+      mongo_uri_configured: !!MONGODB_URI,
+      imgbb_configured: !!IMGBB_API_KEY,
+      mongo_connected: false,
+      mongo_error: null,
+    };
+    try {
+      const client = await getClient();
+      await client.db("admin").command({ ping: 1 });
+      health.mongo_connected = true;
+    } catch (e) {
+      health.mongo_error = errorMessage(e);
+    }
+    return jsonResponse(health, health.mongo_connected ? 200 : 503);
+  }
+
+  // ===== Static HTML pages =====
   if (method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
     try {
       const html = await Deno.readTextFile("./index.html");
@@ -204,12 +248,9 @@ async function handleRequest(req: Request): Promise<Response> {
     }
   }
 
-  // ---- API ----
+  // ===== API =====
   try {
-    // ============================================================
-    // SERVICE SETTINGS  (shared with Flask: DashboardDB.settings)
-    // document shape: { key: "service_settings", value: { categories: [...] } }
-    // ============================================================
+    // ---- SERVICE SETTINGS ----
     if (method === "GET" && url.pathname === "/get_service_settings") {
       try {
         const sdb = await getSettingsDb();
@@ -217,11 +258,9 @@ async function handleRequest(req: Request): Promise<Response> {
         if (doc && doc.value && Array.isArray(doc.value.categories)) {
           return jsonResponse({ status: "success", settings: doc.value });
         }
-        // No doc in DB → return defaults (without writing, to keep DB authoritative)
         return jsonResponse({ status: "success", settings: DEFAULT_SETTINGS });
       } catch (e) {
         console.error("get_service_settings error:", errorMessage(e));
-        // On failure, still return defaults so the form works
         return jsonResponse({ status: "success", settings: DEFAULT_SETTINGS });
       }
     }
@@ -238,17 +277,53 @@ async function handleRequest(req: Request): Promise<Response> {
       return jsonResponse({ status: "success" });
     }
 
-    // ============================================================
-    // ORDERS  (bypro_orders.orders)
-    // ============================================================
+    // ---- ORDERS ----
     if (method === "POST" && url.pathname === "/submit_order") {
-      const odb = await getOrdersDb();
-      const order = await req.json();
+      // ===== DIAGNOSTIC: log incoming request =====
+      console.log("=== NEW ORDER SUBMISSION ===");
+
+      let order: any;
+      try {
+        order = await req.json();
+      } catch (e) {
+        console.error("Invalid JSON in request:", errorMessage(e));
+        return jsonResponse({
+          status: "error",
+          error: "بيانات الطلب غير صالحة (JSON غير صحيح)"
+        }, 400);
+      }
+
+      console.log("Order fields:", Object.keys(order).join(", "));
+      console.log("Order name:", order.fullName || order.name || "(missing)");
+
+      // Validate required fields
+      const requiredFields = ["fullName", "email", "phone", "categoryName", "service"];
+      const missing = requiredFields.filter(f => !order[f]);
+      if (missing.length > 0) {
+        console.warn("Missing required fields:", missing.join(", "));
+        return jsonResponse({
+          status: "error",
+          error: "حقول مطلوبة مفقودة: " + missing.join(", ")
+        }, 400);
+      }
+
       order.createdAt = new Date().toISOString();
       order.status = "pending";
       order.isNew = true;
-      const result = await odb.collection(ORDERS_COLLECTION).insertOne(order);
-      return jsonResponse({ status: "success", id: String(result.insertedId) });
+
+      try {
+        const odb = await getOrdersDb();
+        const result = await odb.collection(ORDERS_COLLECTION).insertOne(order);
+        console.log("✓ Order inserted with id:", result.insertedId);
+        return jsonResponse({ status: "success", id: String(result.insertedId) });
+      } catch (e) {
+        const msg = errorMessage(e);
+        console.error("✗ Failed to insert order:", msg);
+        return jsonResponse({
+          status: "error",
+          error: "فشل حفظ الطلب في قاعدة البيانات: " + msg
+        }, 500);
+      }
     }
 
     if (method === "GET" && url.pathname === "/get_orders") {
@@ -308,9 +383,7 @@ async function handleRequest(req: Request): Promise<Response> {
       return jsonResponse({ status: "success" });
     }
 
-    // ============================================================
-    // IMAGE UPLOAD (ImgBB)
-    // ============================================================
+    // ---- IMAGE UPLOAD ----
     if (method === "POST" && url.pathname === "/upload_images") {
       if (!IMGBB_API_KEY) {
         return jsonResponse({ status: "success", urls: [], warning: "IMGBB_API_KEY not configured" });
@@ -347,6 +420,7 @@ async function handleRequest(req: Request): Promise<Response> {
   } catch (e) {
     const msg = errorMessage(e);
     console.error("Handler error:", msg);
+    console.error("Stack:", e instanceof Error ? e.stack : "(no stack)");
     return jsonResponse({ status: "error", error: msg }, 500);
   }
 
